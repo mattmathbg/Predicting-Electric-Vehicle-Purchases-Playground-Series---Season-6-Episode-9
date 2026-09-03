@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Data files (Kaggle datasets should not be committed to Git)
+data/*.csv
+data/*.zip
+*.zip
+playground-series-s6e9.zip
+
+# Model artifacts and logs
+catboost_info/
+*.log
+*.tsv
+
+# Temporary submissions
+submissions/temp/
+*.tmp
+
+# Environment and IDE
+.env
+.venv/
+env/
+venv/
+ENV/
+.vscode/
+.idea/
+.gemini/
+.DS_Store
