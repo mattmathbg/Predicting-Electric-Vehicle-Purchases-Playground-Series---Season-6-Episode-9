@@ -6,8 +6,22 @@
 [![Frameworks](https://img.shields.io/badge/Frameworks-LightGBM%20%7C%20XGBoost%20%7C%20CatBoost-green.svg)]()
 [![Metric](https://img.shields.io/badge/Metric-ROC--AUC-orange.svg)]()
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg)]()
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mattmathbg/Predicting-Electric-Vehicle-Purchases-Playground-Series---Season-6-Episode-9/blob/main/ensemble_solution.ipynb)
 
 > **Objectif :** Prédire avec précision la probabilité d'achat d'un véhicule électrique (`Will_Buy_EV`) à partir des caractéristiques socio-démographiques, des habitudes de transport et de l'infrastructure de recharge.
+
+---
+
+### 🚀 Exécution Directe sur Google Colab (GPU Gratuit)
+
+Cliquez sur le badge ci-dessous pour ouvrir et exécuter le notebook directement sur **Google Colab** avec accélération GPU (T4 / A100) :
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mattmathbg/Predicting-Electric-Vehicle-Purchases-Playground-Series---Season-6-Episode-9/blob/main/ensemble_solution.ipynb)
+
+1. **Activer le GPU** : `Exécution` > `Modifier le type d'exécution` > Sélectionner **GPU T4**.
+2. **Déposer les fichiers** : Glissez `train.csv` et `test.csv` dans le volet des fichiers Colab à gauche (ou montez Google Drive).
+3. **Lancer l'entraînement** : `Exécution` > `Tout exécuter`. L'ensemble 10-Fold (LGBM + XGBoost GPU + CatBoost GPU + Pseudo-labeling) s'exécute automatiquement en ~5-10 minutes.
+
 
 ---
 
