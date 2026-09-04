@@ -77,6 +77,7 @@ flowchart TD
 ├── submissions/
 │   ├── final/                          # Soumissions finales prêtes pour Kaggle
 │   └── temp/                           # Prédictions intermédiaires et modèles individuels
+├── ensemble_solution.ipynb             # 📓 Notebook interactif optimisé Kaggle & Google Colab (GPU)
 ├── ensemble_solution.py                # 🚀 Pipeline Grandmaster complet (LGBM + XGB + CatBoost + Pseudo-Labeling)
 ├── solution.py                         # Modèle LightGBM rapide et autonome
 ├── requirements.txt                    # Dépendances du projet
@@ -86,19 +87,33 @@ flowchart TD
 
 ---
 
-## 🛠️ Installation & Reproduction
+## 🛠️ Utilisation : Notebook (Kaggle & Colab) ou Scripts Python
 
-### 1. Cloner le dépôt et installer les dépendances
+### Option A : Exécuter sur Kaggle ou Google Colab (Recommandé)
+Le notebook [`ensemble_solution.ipynb`](file:///d:/Kaggle/Predicting%20Electric%20Vehicle%20Purchases/ensemble_solution.ipynb) détecte automatiquement l'environnement et le GPU :
+1. **Sur Kaggle Notebooks** :
+   * Créer un nouveau Notebook sur la page du concours.
+   * `File` -> `Import Notebook` -> Uploader `ensemble_solution.ipynb`.
+   * Dans les paramètres à droite : Activer **GPU T4 x2** ou **P100**.
+   * Cliquer sur *Run All* / *Save Version (Commit)*.
+2. **Sur Google Colab** :
+   * Ouvrir Google Colab et uploader `ensemble_solution.ipynb`.
+   * Menu `Exécution` -> `Modifier le type d'exécution` -> Choisir **GPU T4**.
+   * Exécuter les cellules.
+
+### Option B : Exécution Locale en Ligne de Commande
+
+#### 1. Cloner le dépôt et installer les dépendances
 ```bash
 git clone https://github.com/mattmathbg/Predicting-Electric-Vehicle-Purchases-Playground-Series---Season-6-Episode-9.git
 cd Predicting-Electric-Vehicle-Purchases-Playground-Series---Season-6-Episode-9
 pip install -r requirements.txt
 ```
 
-### 2. Télécharger les données
+#### 2. Télécharger les données
 Placez les fichiers `train.csv`, `test.csv` et `sample_submission.csv` dans le dossier `data/` (ou directement à la racine).
 
-### 3. Exécuter la solution
+#### 3. Exécuter la solution
 
 * **Solution Rapide (LightGBM 5-Fold)** :
   ```bash
