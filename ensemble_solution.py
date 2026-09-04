@@ -460,9 +460,13 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
         cat_cols_list = [col for col in ['Gender', 'City_Type', 'Current_Car_Type'] if col in X.columns]
         X_cat = X.copy()
         X_test_cat = X_test.copy()
-        for col in cat_cols_list:
-            X_cat[col] = X_cat[col].astype(str)
-            X_test_cat[col] = X_test_cat[col].astype(str)
+        for c in X_cat.select_dtypes(include=['category']).columns:
+            if c in cat_cols_list:
+                X_cat[c] = X_cat[c].astype(str)
+                X_test_cat[c] = X_test_cat[c].astype(str)
+            else:
+                X_cat[c] = X_cat[c].cat.codes.astype(float)
+                X_test_cat[c] = X_test_cat[c].cat.codes.astype(float)
             
         cat_params = {
             'iterations': 1800,
