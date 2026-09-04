@@ -57,12 +57,32 @@ warnings.filterwarnings('ignore')
 
 
 def check_cuda_available():
-    """Détecte automatiquement si un GPU NVIDIA CUDA est disponible."""
+    """Détecte directement si un GPU NVIDIA CUDA est opérationnel pour XGBoost et CatBoost."""
     try:
-        import torch
-        return torch.cuda.is_available()
+        from xgboost import XGBClassifier
+        m = XGBClassifier(device='cuda', n_estimators=1)
+        m.fit(np.zeros((2, 2)), np.array([0, 1]))
+        return True
     except Exception:
-        return False
+        pass
+    try:
+        import subprocess
+        res = subprocess.run(['nvidia-smi'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if res.returncode == 0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def get_gpu_device_name():
+    """Récupère le nom du GPU NVIDIA détecté."""
+    try:
+        import subprocess
+        res = subprocess.check_output(['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'], encoding='utf-8')
+        return res.strip()
+    except Exception:
+        return "NVIDIA CUDA GPU"
 
 
 # ==================================================================================================
@@ -534,7 +554,7 @@ def main():
     
     print("="*76)
     print(f"🚀 Kaggle Playground s6e9 - Solution Grandmaster ({N_SPLITS}-Fold Ensemble + GPU + Pseudo-Labeling)")
-    print(f"⚡ Matériel Détecté : {'GPU NVIDIA CUDA' if USE_GPU else 'CPU Multi-Core'}")
+    print(f"⚡ Matériel Détecté : {get_gpu_device_name() if USE_GPU else 'CPU Multi-Core'}")
     print("="*76)
     
     train_path = get_data_path('train.csv')
