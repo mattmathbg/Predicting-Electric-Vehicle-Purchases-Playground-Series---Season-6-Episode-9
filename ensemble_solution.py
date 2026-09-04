@@ -436,8 +436,8 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
         cat_oof = np.zeros(len(X))
         cat_test = np.zeros(len(X_test))
         
-        # Encodage numérique optimisé pour CatBoost GPU afin d'éviter le CPU overhead
-        cat_cols_list = [col for col in ['Gender', 'City_Type', 'Current_Car_Type', 'City_and_Car', 'Gender_and_Car', 'City_and_Anxiety', 'HomeCharge_and_City', 'Demographic_Segment'] if col in X.columns]
+        # Encodage catégoriel ciblé sur les 3 catégories de base pour une vitesse maximale (évite l'explosion combinatoire)
+        cat_cols_list = [col for col in ['Gender', 'City_Type', 'Current_Car_Type'] if col in X.columns]
         X_cat = X.copy()
         X_test_cat = X_test.copy()
         for col in cat_cols_list:
