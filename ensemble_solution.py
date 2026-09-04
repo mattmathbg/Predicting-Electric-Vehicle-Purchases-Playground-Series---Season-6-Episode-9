@@ -43,11 +43,19 @@ except ImportError:
 
 warnings.filterwarnings('ignore')
 
+def check_cuda_available():
+    """Détecte automatiquement si un GPU NVIDIA CUDA est disponible."""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except Exception:
+        return False
+
 # ==================================================================================================
 # PARAMÈTRES DE CONTRÔLE DE LA SOLUTION
 # ==================================================================================================
 N_SPLITS = 10                     # 🚀 10-Fold Cross-Validation pour minimiser la variance et maximiser le score
-USE_GPU = True                   # 🚀 Utiliser le GPU NVIDIA CUDA (CatBoost + XGBoost)
+USE_GPU = check_cuda_available() # 🚀 Auto-détection GPU NVIDIA CUDA (ou fallback automatique CPU)
 USE_PSEUDO_LABELING = True       # 🚀 Pseudo-Labeling Itératif Semi-Supervisé
 PSEUDO_LABEL_THRESHOLD_HIGH = 0.980 # Seuil positif haute confiance
 PSEUDO_LABEL_THRESHOLD_LOW = 0.020  # Seuil négatif haute confiance
