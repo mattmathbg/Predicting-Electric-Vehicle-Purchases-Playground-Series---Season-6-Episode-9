@@ -126,15 +126,15 @@ def preprocess_and_feature_engineering(df):
     df = df.copy()
     
     # --- A. Encodage binaire et ordinal ---
-    binary_map = {'Yes': 1, 'No': 0}
-    if 'Home_Charging_Possible' in df.columns and df['Home_Charging_Possible'].dtype == 'object':
-        df['Home_Charging_Possible'] = df['Home_Charging_Possible'].map(binary_map).fillna(0).astype(int)
-    if 'Subsidy_Available' in df.columns and df['Subsidy_Available'].dtype == 'object':
-        df['Subsidy_Available'] = df['Subsidy_Available'].map(binary_map).fillna(0).astype(int)
+    binary_map = {'Yes': 1.0, 'No': 0.0, 1: 1.0, 0: 0.0, '1': 1.0, '0': 0.0}
+    if 'Home_Charging_Possible' in df.columns:
+        df['Home_Charging_Possible'] = df['Home_Charging_Possible'].map(binary_map).fillna(0.0).astype(float)
+    if 'Subsidy_Available' in df.columns:
+        df['Subsidy_Available'] = df['Subsidy_Available'].map(binary_map).fillna(0.0).astype(float)
         
-    range_map = {'Low': 0, 'Medium': 1, 'High': 2}
-    if 'Range_Anxiety_Level' in df.columns and df['Range_Anxiety_Level'].dtype == 'object':
-        df['Range_Anxiety_Level'] = df['Range_Anxiety_Level'].map(range_map).fillna(1).astype(int)
+    range_map = {'Low': 0.0, 'Medium': 1.0, 'High': 2.0, 0: 0.0, 1: 1.0, 2: 2.0, '0': 0.0, '1': 1.0, '2': 2.0}
+    if 'Range_Anxiety_Level' in df.columns:
+        df['Range_Anxiety_Level'] = df['Range_Anxiety_Level'].map(range_map).fillna(1.0).astype(float)
 
     # --- B. Features Métier de Base ---
     df['Total_Charging_Stations'] = df['Charging_Stations_Near_Home'] + df['Charging_Stations_Near_Work']
