@@ -12,10 +12,18 @@ Solution Haute Performance pour franchir 0.946+ :
 """
 
 import os
+import sys
 import time
 import warnings
 import numpy as np
 import pandas as pd
+
+# Fix encodage console Windows pour l'affichage fluide des emojis et caractères UTF-8
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from scipy.optimize import minimize
 from scipy.stats import rankdata
 from sklearn.metrics import roc_auc_score

@@ -9,10 +9,18 @@ Format de sortie attendu : id, Will_Buy_EV (probabilité entre 0.0 et 1.0)
 """
 
 import os
+import sys
 import time
 import warnings
 import numpy as np
 import pandas as pd
+
+# Fix encodage console Windows pour l'affichage fluide des emojis et caractères UTF-8
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
 from lightgbm import LGBMClassifier, early_stopping, log_evaluation
@@ -157,7 +165,7 @@ def main():
     # ----------------------------------------------------------------------------------
     # 4. Schéma de Validation Croisée (Stratified 5-Fold)
     # ----------------------------------------------------------------------------------
-    n_splits = 5
+    n_splits = 10
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
     
     oof_preds = np.zeros(len(train))
