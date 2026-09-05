@@ -1,16 +1,24 @@
 """
 ====================================================================================================
 Kaggle Playground Series s6e9 : Predicting Electric Vehicle Purchases
-🏆 Solution Grandmaster Haute Performance (Target ROC-AUC ~0.9467+ / Top 1)
+🏆 Solution Grandmaster Diversifiée (Trees + Neural Net + Stacking Level-2)
+Cible : Dépasser 0.9467+ (Top 1)
 
-Architecture & Nouveaux Leviers de Performance :
-  1. Adaptation Universelle Google Colab (GPU T4) / Kaggle GPU / Local CPU.
-  2. Feature Engineering Avancé de Niveau Grandmaster (Stress Index, Anxiety Buffer, Affordability,
-     Paradoxe de Simpson, Fréquence d'apparition & Interactions).
-  3. Statistiques Agrégées Multi-Profils & Smooth Out-Of-Fold Bayesian Target Encoding.
-  4. Modèles de Pointe Hyper-Optimisés pour GPU T4 (LightGBM, XGBoost CUDA, CatBoost GPU 10x plus rapide).
-  5. Assemblage Hybride : Optimiseur Nelder-Mead sur les Rangs + Stacking Meta-Learner (Logistic Regression).
-  6. Pseudo-Labeling Itératif Semi-Supervisé Débrayable (Gain démontré vers 0.946+).
+Architecture & Stratégie de Diversification :
+  1. Décorrélation des Arbres :
+     - LightGBM : Découpage par feuilles (num_leaves=36, max_depth=6), ensemble complet de features.
+     - XGBoost : Découpage par profondeur (max_depth=5), sous-échantillonnage strict (colsample_bytree=0.60)
+       pour forcer des chemins d'arbres décorrélés. Accélération GPU CUDA.
+     - CatBoost : Arbres symétriques/oblivious (depth=6), AUCUNE variable de Target Encoding manuel.
+       CatBoost exploite exclusivement son propre encodage dynamique ordonné sur les catégories brutes.
+  2. Modèle Réseau de Neurones Tabulaire (PyTorch TabularMLP) :
+     - Couches Linear + BatchNorm1d + SiLU + Dropout + Embeddings catégoriels.
+     - Apprentissage sur manifold continu, extrêmement complémentaire aux frontières orthogonales des GBDT.
+  3. Assemblage Avancé :
+     - Optimiseur Nelder-Mead directement sur la métrique ROC-AUC (Espace des Rangs).
+     - Stacking Level-2 Meta-Learner (Régression Logistique).
+     - Fusion hybride Rank-Averaging + Stacking.
+  4. Pseudo-Labeling Débrayable (Désactivé par défaut pour des itérations ultra-rapides).
 ====================================================================================================
 """
 
@@ -31,27 +39,29 @@ from scipy.optimize import minimize
 from scipy.stats import rankdata
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
+
+import lightgbm as lgb
 from lightgbm import LGBMClassifier, early_stopping, log_evaluation
 
 try:
+    import xgboost as xgb
     from xgboost import XGBClassifier
     HAS_XGB = True
 except ImportError:
     HAS_XGB = False
 
 try:
+    import catboost as cb
     from catboost import CatBoostClassifier
     HAS_CAT = True
 except ImportError:
     HAS_CAT = False
 
-try:
-    import optuna
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-    HAS_OPTUNA = True
-except ImportError:
-    HAS_OPTUNA = False
+import torch
+import torch.nn as nn
+from torch.utils.data import TensorDataset, DataLoader
 
 warnings.filterwarnings('ignore')
 
@@ -86,15 +96,16 @@ def get_gpu_device_name():
 
 
 # ==================================================================================================
-# PARAMÈTRES DE CONTRÔLE DE LA SOLUTION (GRANDMASTER CONFIGURATION)
+# PARAMÈTRES DE CONTRÔLE DE LA SOLUTION
 # ==================================================================================================
-N_SPLITS = 10                        # 🚀 10-Fold CV pour stabilité et précision maximale (passer à 5 pour itération rapide)
-USE_GPU = check_cuda_available()    # 🚀 Auto-détection GPU NVIDIA CUDA (T4/P100) avec fallback CPU
-USE_PSEUDO_LABELING = True          # 🚀 Pseudo-Labeling Itératif Semi-Supervisé (Round 2)
+N_SPLITS = 10                        # 🚀 10-Fold CV (stabilité et gain compétitif maximal)
+USE_GPU = check_cuda_available()    # 🚀 Détection automatique GPU NVIDIA CUDA
+USE_PSEUDO_LABELING = False         # 🚀 DÉSACTIVÉ par défaut (gain de 20-25 min, pas de bruit sur les prédictions)
 PSEUDO_LABEL_THRESHOLD_HIGH = 0.980 # Seuil positif haute confiance
 PSEUDO_LABEL_THRESHOLD_LOW = 0.020  # Seuil négatif haute confiance
-USE_STACKING_META_LEARNER = True    # 🚀 Stacking Level-2 avec Régression Logistique sur OOF
-USE_ORIGINAL_DATA = True            # 🚀 Intégration du dataset original externe si présent
+USE_TABULAR_NN = True               # 🚀 Modèle Réseau de Neurones Tabulaire (PyTorch MLP)
+USE_STACKING_META_LEARNER = True    # 🚀 Stacking Level-2 (Régression Logistique)
+USE_ORIGINAL_DATA = True            # 🚀 Intégration dataset original si disponible
 RANDOM_SEED = 42
 
 
@@ -137,15 +148,15 @@ def get_data_path(filename):
 
 
 # ==================================================================================================
-# 1. FEATURE ENGINEERING DE NIVEAU GRANDMASTER (NOUVEAUX LEVIERS CLÉS)
+# 1. FEATURE ENGINEERING DE NIVEAU GRANDMASTER
 # ==================================================================================================
 def preprocess_and_feature_engineering(df):
     """
-    Génération des variables métier à fort impact pour la prédiction d'achat de VE.
+    Génération des variables métier à fort impact.
     """
     df = df.copy()
     
-    # --- A. Encodage binaire et ordinal ---
+    # --- A. Encodage binaire et ordinal universel ---
     binary_map = {'Yes': 1.0, 'No': 0.0, 1: 1.0, 0: 0.0, '1': 1.0, '0': 0.0}
     if 'Home_Charging_Possible' in df.columns:
         df['Home_Charging_Possible'] = df['Home_Charging_Possible'].map(binary_map).fillna(0.0).astype(float)
@@ -170,20 +181,11 @@ def preprocess_and_feature_engineering(df):
     df['Home_Charge_High_Income'] = df['Home_Charging_Possible'] * (df['Annual_Income_USD'] / 10000.0)
     df['Commute_No_Home_Charge'] = df['Daily_Commute_km'] * (1.0 - df['Home_Charging_Possible'])
 
-    # --- D. NOUVEAUX LEVIERS GRANDMASTER (3-5 Nouvelles Variables Clés) ---
-    # 1. Indice de stress de trajet (Commute Stress Index)
+    # --- D. NOUVEAUX LEVIERS GRANDMASTER ---
     df['Commute_Stress_Index'] = df['Daily_Commute_km'] / (df['Total_Charging_Stations'] + df['Home_Charging_Possible'] * 6.0 + 1.0)
-    
-    # 2. Ratio d'amortissement de l'anxiété par l'infrastructure locale (Anxiety Buffer Ratio)
     df['Anxiety_Buffer_Ratio'] = (df['Range_Anxiety_Level'] + 1.0) / (df['Total_Charging_Stations'] + df['Home_Charging_Possible'] * 3.0 + 1.0)
-    
-    # 3. Indice de pouvoir d'achat pondéré par l'aide (EV Affordability Index)
     df['EV_Affordability_Index'] = (df['Annual_Income_USD'] * (1.0 + 0.4 * df['Subsidy_Available'])) / ((df['Age'] * (df['Number_of_Cars_Owned'] + 1.0)) + 1.0)
-    
-    # 4. Accès aux bornes par véhicule possédé
     df['Station_Access_Per_Vehicle'] = df['Total_Charging_Stations'] / (df['Number_of_Cars_Owned'] + 1.0)
-    
-    # 5. Propension d'action écologique pondérée par l'infrastructure
     df['Eco_Action_Propensity'] = (df['Environmental_Concern_Level'] * (df['Home_Charging_Possible'] + 1.0)) / (df['Range_Anxiety_Level'] + 1.0)
 
     # --- E. Élasticité des Subventions & Interactions Non-Linéaires ---
@@ -221,9 +223,7 @@ def preprocess_and_feature_engineering(df):
 
 
 def add_group_aggregations(df_all):
-    """
-    Calcule les écarts et ratios par rapport aux moyennes de groupe (Revenu & Trajet).
-    """
+    """Calcule les écarts et ratios par rapport aux moyennes de groupe."""
     df = df_all.copy()
     for grp in ['City_and_Car', 'HomeCharge_and_City', 'Demographic_Segment']:
         stats = df.groupby(grp, observed=False)['Annual_Income_USD'].agg(['mean', 'std']).reset_index()
@@ -239,9 +239,7 @@ def add_group_aggregations(df_all):
 # 2. OUT-OF-FOLD SMOOTH TARGET ENCODING (Sans Data Leakage)
 # ==================================================================================================
 def apply_oof_target_encoding(train_df, test_df, cat_cols, target_col, skf, m_smoothing=20.0):
-    """
-    Calcule l'encodage de la cible avec lissage bayésien de manière Out-Of-Fold.
-    """
+    """Calcule l'encodage de la cible avec lissage bayésien de manière Out-Of-Fold."""
     train_encoded = train_df.copy()
     test_encoded = test_df.copy()
     
@@ -272,12 +270,106 @@ def apply_oof_target_encoding(train_df, test_df, cat_cols, target_col, skf, m_sm
 
 
 # ==================================================================================================
-# 3. RANK AVERAGING, STACKING & OPTIMISATION NELDER-MEAD
+# 3. MODÈLE RÉSEAU DE NEURONES TABULAIRE (PyTorch TabularMLP)
+# ==================================================================================================
+class TabularMLP(nn.Module):
+    """Réseau de neurones tabulaire avec Entity Embeddings pour catégories + BatchNorm + SiLU + Dropout."""
+    def __init__(self, num_cont, cat_cardinalities):
+        super().__init__()
+        self.embeddings = nn.ModuleList([
+            nn.Embedding(card, min(16, max(2, (card + 1) // 2)))
+            for card in cat_cardinalities
+        ])
+        total_emb_dim = sum(e.embedding_dim for e in self.embeddings)
+        in_dim = num_cont + total_emb_dim
+        self.net = nn.Sequential(
+            nn.Linear(in_dim, 128),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            nn.Dropout(0.25),
+            nn.Linear(128, 64),
+            nn.BatchNorm1d(64),
+            nn.SiLU(),
+            nn.Dropout(0.15),
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.SiLU(),
+            nn.Linear(32, 1)
+        )
+        
+    def forward(self, x_cont, x_cat):
+        if len(self.embeddings) > 0 and x_cat is not None:
+            embs = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]
+            x = torch.cat([x_cont] + embs, dim=1)
+        else:
+            x = x_cont
+        return self.net(x).squeeze(-1)
+
+
+def train_tabular_mlp(X_tr, y_tr, X_va, y_va, X_test, cat_cols_base, device, epochs=8, batch_size=4096):
+    """Entraîne un MLP Tabulaire PyTorch sur un pli avec standardisation et embeddings."""
+    cont_cols = [c for c in X_tr.columns if c not in cat_cols_base and str(X_tr[c].dtype) != 'category']
+    
+    scaler = StandardScaler()
+    X_tr_cont = scaler.fit_transform(X_tr[cont_cols].fillna(0.0).values).astype(np.float32)
+    X_va_cont = scaler.transform(X_va[cont_cols].fillna(0.0).values).astype(np.float32)
+    X_test_cont = scaler.transform(X_test[cont_cols].fillna(0.0).values).astype(np.float32)
+    
+    # Préparation des catégories
+    cat_cards = [int(X_tr[c].nunique()) + 2 for c in cat_cols_base]
+    X_tr_cat = np.column_stack([X_tr[c].astype('category').cat.codes.values for c in cat_cols_base]).astype(np.int64)
+    X_va_cat = np.column_stack([X_va[c].astype('category').cat.codes.values for c in cat_cols_base]).astype(np.int64)
+    X_test_cat = np.column_stack([X_test[c].astype('category').cat.codes.values for c in cat_cols_base]).astype(np.int64)
+    
+    # Clip valeurs négatives de codes
+    X_tr_cat = np.clip(X_tr_cat, 0, None)
+    X_va_cat = np.clip(X_va_cat, 0, None)
+    X_test_cat = np.clip(X_test_cat, 0, None)
+    
+    model = TabularMLP(num_cont=len(cont_cols), cat_cardinalities=cat_cards).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=3e-3, weight_decay=1e-4)
+    criterion = nn.BCEWithLogitsLoss()
+    
+    train_ds = TensorDataset(torch.from_numpy(X_tr_cont), torch.from_numpy(X_tr_cat), torch.from_numpy(y_tr.values.astype(np.float32)))
+    train_dl = DataLoader(train_ds, batch_size=batch_size, shuffle=True, drop_last=False)
+    
+    va_cont_t = torch.from_numpy(X_va_cont).to(device)
+    va_cat_t = torch.from_numpy(X_va_cat).to(device)
+    test_cont_t = torch.from_numpy(X_test_cont).to(device)
+    test_cat_t = torch.from_numpy(X_test_cat).to(device)
+    
+    best_auc = 0.0
+    best_preds_val = None
+    best_preds_test = None
+    
+    for epoch in range(epochs):
+        model.train()
+        for bx_cont, bx_cat, by in train_dl:
+            bx_cont, bx_cat, by = bx_cont.to(device), bx_cat.to(device), by.to(device)
+            optimizer.zero_grad()
+            logits = model(bx_cont, bx_cat)
+            loss = criterion(logits, by)
+            loss.backward()
+            optimizer.step()
+            
+        model.eval()
+        with torch.no_grad():
+            val_logits = model(va_cont_t, va_cat_t)
+            val_preds = torch.sigmoid(val_logits).cpu().numpy()
+            val_auc = roc_auc_score(y_va, val_preds)
+            if val_auc > best_auc:
+                best_auc = val_auc
+                best_preds_val = val_preds
+                best_preds_test = torch.sigmoid(model(test_cont_t, test_cat_t)).cpu().numpy()
+                
+    return best_preds_val, best_preds_test, best_auc
+
+
+# ==================================================================================================
+# 4. RANK AVERAGING & STACKING META-LEARNER
 # ==================================================================================================
 def rank_average(pred_list, weights=None):
-    """
-    Moyenne pondérée des rangs normalisée entre 0 et 1.
-    """
+    """Moyenne pondérée des rangs normalisée entre 0 et 1."""
     if weights is None:
         weights = [1.0 / len(pred_list)] * len(pred_list)
     else:
@@ -292,9 +384,7 @@ def rank_average(pred_list, weights=None):
 
 
 def optimize_ensemble_weights(y_true, pred_list):
-    """
-    Trouve mathématiquement la combinaison de poids qui maximise exactement le ROC-AUC global.
-    """
+    """Trouve mathématiquement la combinaison de poids qui maximise exactement le ROC-AUC."""
     n_models = len(pred_list)
     if n_models == 1:
         return [1.0]
@@ -313,9 +403,7 @@ def optimize_ensemble_weights(y_true, pred_list):
 
 
 def train_stacking_meta_learner(y_true, oof_preds_list, test_preds_list):
-    """
-    Entraîne un meta-learner de niveau 2 (Logistic Regression) sur les prédictions OOF.
-    """
+    """Entraîne un meta-learner de niveau 2 (Logistic Regression) sur les prédictions OOF."""
     X_meta = np.column_stack(oof_preds_list)
     X_test_meta = np.column_stack(test_preds_list)
     
@@ -330,11 +418,15 @@ def train_stacking_meta_learner(y_true, oof_preds_list, test_preds_list):
 
 
 # ==================================================================================================
-# 4. PIPELINE D'ENTRAÎNEMENT MULTI-MODÈLES ULTRA-RAPIDE (GPU T4 / CPU)
+# 5. PIPELINE D'ENTRAÎNEMENT DIVERSIFIÉ (LGBM + XGB DÉCORRÉLÉ + CATBOUST BRUT + TABULAR MLP)
 # ==================================================================================================
 def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
     """
-    Entraîne LightGBM, XGBoost et CatBoost avec 10-Fold CV et optimise leur assemblage.
+    Entraîne 4 modèles profondément décorrélés :
+      1. LightGBM (Leaf-wise GBDT sur features complètes)
+      2. XGBoost GPU (Depth-wise GBDT décorrélé avec max_depth=5, colsample=0.60)
+      3. CatBoost GPU (Symmetric Oblivious trees sur catégories brutes, SANS target encoding manuel)
+      4. TabularMLP PyTorch (Réseau de neurones continu avec Embeddings)
     """
     timing_report = {}
     
@@ -342,7 +434,7 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
     # Modèle 1 : LightGBM (Hyper-Tuned & Fast)
     # --------------------------------------------------------------------------
     print("\n" + "-"*68)
-    print(f"📦 [1/3] Entraînement LightGBM ({skf.n_splits} Folds) - [{tag}]...")
+    print(f"📦 [1/4] Entraînement LightGBM ({skf.n_splits} Folds) - [{tag}]...")
     print("-"*68)
     lgb_start = time.time()
     
@@ -388,14 +480,14 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
     print(f"  🏆 Score LightGBM OOF ROC-AUC : {lgb_auc:.5f} | ⏱️ Temps Total : {format_duration(lgb_time)}")
 
     # --------------------------------------------------------------------------
-    # Modèle 2 : XGBoost (GPU Accelerated CUDA Hist)
+    # Modèle 2 : XGBoost GPU Décorrélé (max_depth=5, colsample=0.60)
     # --------------------------------------------------------------------------
     xgb_oof = None
     xgb_test = None
     if HAS_XGB:
         print("\n" + "-"*68)
         gpu_tag = "GPU (CUDA)" if USE_GPU else "CPU"
-        print(f"📦 [2/3] Entraînement XGBoost [{gpu_tag}] ({skf.n_splits} Folds) - [{tag}]...")
+        print(f"📦 [2/4] Entraînement XGBoost Décorrélé [{gpu_tag}] ({skf.n_splits} Folds) - [{tag}]...")
         print("-"*68)
         xgb_start = time.time()
         
@@ -405,9 +497,9 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
         xgb_params = {
             'n_estimators': 2200,
             'learning_rate': 0.03,
-            'max_depth': 6,
-            'subsample': 0.85,
-            'colsample_bytree': 0.80,
+            'max_depth': 5,              # 🚀 Profondeur réduite pour décorréler de LightGBM
+            'subsample': 0.80,
+            'colsample_bytree': 0.60,    # 🚀 Forcer les arbres à emprunter des chemins différents
             'tree_method': 'hist',
             'device': 'cuda' if USE_GPU else 'cpu',
             'enable_categorical': True,
@@ -415,7 +507,7 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
             'early_stopping_rounds': 40,
             'reg_alpha': 0.1,
             'reg_lambda': 1.5,
-            'random_state': RANDOM_SEED,
+            'random_state': RANDOM_SEED + 10,
             'n_jobs': -1
         }
         
@@ -442,24 +534,26 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
         print(f"  🏆 Score XGBoost OOF ROC-AUC : {xgb_auc:.5f} | ⏱️ Temps Total : {format_duration(xgb_time)}")
 
     # --------------------------------------------------------------------------
-    # Modèle 3 : CatBoost (GPU Quantized Logloss - Ultra Fast)
+    # Modèle 3 : CatBoost GPU Brut (SANS Target Encoding Manuel)
     # --------------------------------------------------------------------------
     cat_oof = None
     cat_test = None
     if HAS_CAT:
         print("\n" + "-"*68)
         gpu_label = "GPU (CUDA)" if USE_GPU else "CPU"
-        print(f"📦 [3/3] Entraînement CatBoost [{gpu_label}] ({skf.n_splits} Folds) - [{tag}]...")
+        print(f"📦 [3/4] Entraînement CatBoost Brut [{gpu_label}] ({skf.n_splits} Folds) - [{tag}]...")
         print("-"*68)
         cat_start = time.time()
         
         cat_oof = np.zeros(len(X))
         cat_test = np.zeros(len(X_test))
         
-        # Encodage catégoriel ciblé sur les 3 catégories de base pour une vitesse maximale (évite l'explosion combinatoire)
-        cat_cols_list = [col for col in ['Gender', 'City_Type', 'Current_Car_Type'] if col in X.columns]
-        X_cat = X.copy()
-        X_test_cat = X_test.copy()
+        # 🚀 Exclusion du Target Encoding manuel : CatBoost utilise son propre target encoding en ligne
+        non_te_cols = [c for c in X.columns if not c.endswith('_TE')]
+        X_cat = X[non_te_cols].copy()
+        X_test_cat = X_test[non_te_cols].copy()
+        
+        cat_cols_list = [col for col in ['Gender', 'City_Type', 'Current_Car_Type'] if col in X_cat.columns]
         for c in X_cat.select_dtypes(include=['category']).columns:
             if c in cat_cols_list:
                 X_cat[c] = X_cat[c].astype(str)
@@ -475,7 +569,7 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
             'l2_leaf_reg': 4.0,
             'eval_metric': 'Logloss',
             'border_count': 128,
-            'random_seed': RANDOM_SEED,
+            'random_seed': RANDOM_SEED + 20,
             'verbose': False,
             'task_type': 'GPU' if USE_GPU else 'CPU',
             'allow_writing_files': False
@@ -507,18 +601,57 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
         print(f"  🏆 Score CatBoost OOF ROC-AUC : {cat_auc:.5f} | ⏱️ Temps Total : {format_duration(cat_time)}")
 
     # --------------------------------------------------------------------------
-    # Assemblage Multi-Modèles : Rank Averaging + Stacking Meta-Learner
+    # Modèle 4 : Réseau de Neurones Tabulaire PyTorch (TabularMLP)
+    # --------------------------------------------------------------------------
+    nn_oof = None
+    nn_test = None
+    if USE_TABULAR_NN:
+        print("\n" + "-"*68)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device_label = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU Multi-Core"
+        print(f"📦 [4/4] Entraînement PyTorch TabularMLP [{device_label}] ({skf.n_splits} Folds) - [{tag}]...")
+        print("-"*68)
+        nn_start = time.time()
+        
+        nn_oof = np.zeros(len(X))
+        nn_test = np.zeros(len(X_test))
+        base_cats = [c for c in ['Gender', 'City_Type', 'Current_Car_Type'] if c in X.columns]
+        
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+            f_start = time.time()
+            X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
+            X_va, y_va = X.iloc[val_idx], y.iloc[val_idx]
+            
+            val_preds, test_preds, f_auc = train_tabular_mlp(
+                X_tr, y_tr, X_va, y_va, X_test, base_cats, device=device, epochs=8, batch_size=4096
+            )
+            nn_oof[val_idx] = val_preds
+            nn_test += test_preds / skf.n_splits
+            
+            print(f"  👉 TabularMLP Fold {fold+1:02d}/{skf.n_splits:02d} | ROC-AUC : {f_auc:.5f} | ⏱️ {format_duration(time.time() - f_start)}")
+            
+        nn_auc = roc_auc_score(y, nn_oof)
+        nn_time = time.time() - nn_start
+        timing_report['TabularMLP'] = {'auc': nn_auc, 'time': nn_time}
+        print(f"  🏆 Score TabularMLP OOF ROC-AUC : {nn_auc:.5f} | ⏱️ Temps Total : {format_duration(nn_time)}")
+
+    # --------------------------------------------------------------------------
+    # Assemblage Multi-Modèles : Rank Averaging Nelder-Mead + Stacking Level-2
     # --------------------------------------------------------------------------
     models_oof = [lgb_oof]
     models_test = [lgb_test]
     
+    if HAS_XGB and xgb_oof is not None:
+        models_oof.append(xgb_oof)
+        models_test.append(xgb_test)
+        
     if HAS_CAT and cat_oof is not None:
         models_oof.append(cat_oof)
         models_test.append(cat_test)
         
-    if HAS_XGB and xgb_oof is not None:
-        models_oof.append(xgb_oof)
-        models_test.append(xgb_test)
+    if USE_TABULAR_NN and nn_oof is not None:
+        models_oof.append(nn_oof)
+        models_test.append(nn_test)
         
     # 1. Poids optimaux par Nelder-Mead sur les rangs
     opt_weights = optimize_ensemble_weights(y, models_oof)
@@ -533,11 +666,11 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
         stack_oof, stack_test, stack_auc, _ = train_stacking_meta_learner(y, models_oof, models_test)
         print(f"  ✨ ROC-AUC Stacking Meta-Learner : {stack_auc:.5f}")
         
-        # Fusion hybride Rank Averaging + Stacking
+        # Fusion hybride 50/50 Rank Averaging + Stacking
         final_oof = rank_average([rank_blend_oof, stack_oof], weights=[0.50, 0.50])
         final_test_preds = rank_average([rank_blend_test, stack_test], weights=[0.50, 0.50])
         final_auc = roc_auc_score(y, final_oof)
-        print(f"  🚀 ROC-AUC Hybride (Rank + Stacking) : {final_auc:.5f}")
+        print(f"  🚀 ROC-AUC Hybride Final (Rank + Stacking) : {final_auc:.5f}")
     else:
         final_oof = rank_blend_oof
         final_test_preds = rank_blend_test
@@ -547,7 +680,7 @@ def train_ensemble_pipeline(X, y, X_test, test_ids, skf, tag="standard"):
 
 
 # ==================================================================================================
-# 5. EXECUTION PRINCIPALE (GRANDMASTER PIPELINE)
+# 6. EXECUTION PRINCIPALE
 # ==================================================================================================
 def main():
     total_start_time = time.time()
@@ -557,7 +690,7 @@ def main():
     os.makedirs('submissions/temp', exist_ok=True)
     
     print("="*76)
-    print(f"🚀 Kaggle Playground s6e9 - Solution Grandmaster ({N_SPLITS}-Fold Ensemble + GPU + Pseudo-Labeling)")
+    print(f"🚀 Kaggle Playground s6e9 - Solution Grandmaster ({N_SPLITS}-Fold Ensemble + GPU)")
     print(f"⚡ Matériel Détecté : {get_gpu_device_name() if USE_GPU else 'CPU Multi-Core'}")
     print("="*76)
     
@@ -604,22 +737,22 @@ def main():
     
     print(f"  • Nombre total de variables explicatives riches : {len(features)}")
     
-    # 3. Entraînement Initial de l'Ensemble Multi-Modèles (Round 1)
+    # 3. Entraînement Initial de l'Ensemble Multi-Modèles
     oof_round1, test_round1, auc_round1, timing_report = train_ensemble_pipeline(
-        X, y, X_test, test_ids, skf, tag="Round 1 - Base Ensemble"
+        X, y, X_test, test_ids, skf, tag="Diversified Grandmaster Ensemble"
     )
     
     print("\n" + "="*76)
-    print(f"🏆 SCORE ENSEMBLE ROUND 1 (HYBRIDE RANK + STACKING) ROC-AUC : {auc_round1:.5f}")
+    print(f"🏆 SCORE ENSEMBLE (HYBRIDE RANK + STACKING + NN) ROC-AUC : {auc_round1:.5f}")
     print("="*76)
     
     final_test_preds = test_round1
     final_auc = auc_round1
     
-    # 4. Pseudo-Labeling Itératif Semi-Supervisé (Round 2)
+    # 4. Pseudo-Labeling Itératif Semi-Supervisé (Optionnel / Débrayable)
     if USE_PSEUDO_LABELING:
         print("\n" + "="*76)
-        print("🤖 Lancement du Pseudo-Labeling Itératif Semi-Supervisé (Cible 0.9467+)...")
+        print("🤖 Lancement du Pseudo-Labeling Itératif Semi-Supervisé...")
         print("="*76)
         
         pseudo_pos_mask = test_round1 >= PSEUDO_LABEL_THRESHOLD_HIGH
@@ -627,8 +760,6 @@ def main():
         pseudo_indices = np.where(pseudo_pos_mask | pseudo_neg_mask)[0]
         
         print(f"  • Échantillons Test haute confiance identifiés : {len(pseudo_indices):,} sur {len(test):,}")
-        print(f"    - Positifs (>= {PSEUDO_LABEL_THRESHOLD_HIGH}) : {pseudo_pos_mask.sum():,}")
-        print(f"    - Négatifs (<= {PSEUDO_LABEL_THRESHOLD_LOW})  : {pseudo_neg_mask.sum():,}")
         
         if len(pseudo_indices) > 500:
             pseudo_X_test = X_test.iloc[pseudo_indices].copy()
@@ -637,24 +768,16 @@ def main():
             X_augmented = pd.concat([X, pseudo_X_test], axis=0).reset_index(drop=True)
             y_augmented = pd.concat([y, pd.Series(pseudo_y_test)], axis=0).reset_index(drop=True)
             
-            print(f"  • Taille du Train Augmenté pour le Round 2 : {len(X_augmented):,} lignes")
-            
             skf_aug = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_SEED)
             oof_round2, test_round2, auc_round2, timing_report_aug = train_ensemble_pipeline(
-                X_augmented, y_augmented, X_test, test_ids, skf_aug, tag="Round 2 - Supercharged Ensemble"
+                X_augmented, y_augmented, X_test, test_ids, skf_aug, tag="Round 2 - Pseudo-Labeled"
             )
             
-            # Évaluation du score combiné sur le train set initial
             oof_aug_original = oof_round2[:len(train)]
             combined_oof = rank_average([oof_round1, oof_aug_original], weights=[0.40, 0.60])
             final_auc = roc_auc_score(y[:len(train)], combined_oof)
             final_test_preds = rank_average([test_round1, test_round2], weights=[0.40, 0.60])
-            
-            print("\n" + "="*76)
             print(f"✨ SCORE GLOBAL COMBINÉ APRÈS PSEUDO-LABELING ROC-AUC : {final_auc:.5f}")
-            print("="*76)
-        else:
-            print("  ⚠️ Échantillons insuffisants pour le pseudo-labeling.")
 
     # --------------------------------------------------------------------------
     # 5. SAUVEGARDE ET BILAN FINAL
@@ -680,12 +803,10 @@ def main():
     sub.to_csv('submission.csv', index=False)
     
     print(f"\n✅ Soumission Finale enregistrée : {final_path}")
-    print(f"   (Copie miroir créée à la racine : submission.csv)")
-    print(f"   (Fichiers temporaires dans : submissions/temp/)")
+    print(f"   (Fichier miroir Kaggle prêt : submission.csv)")
     
     total_time = time.time() - total_start_time
     print(f"\n🏁 Pipeline Grandmaster terminé avec succès ! ⏱️ Durée Totale : {format_duration(total_time)}")
-    print("Aperçu des 5 premières lignes du fichier final :")
     print(sub.head())
 
 
